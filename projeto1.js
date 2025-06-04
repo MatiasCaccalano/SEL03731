@@ -6,6 +6,9 @@ const path = require("path");
 const projeto_1 = require("../models/projeto_1"); // ALTERAÇÃO
 const fileUpload = require("express-fileupload");
 
+module.exports = function(io) {
+
+const router = express.Router();
 
 // Vetor para armazenar os registros
 const registrosProjeto1 = [];
@@ -20,8 +23,8 @@ const client = mqtt.connect('mqtt://igbt.eesc.usp.br', {
 });
 
 // Definição do topico associado ao projeto 1
-const mqtt_topic = 'vaquinha';
-
+const mqtt_topic = 'vaquinha/echo';//recebe dados de id, peso. é subscribed
+const mqtt_topic_send = 'vaquinha'; //envia dados id, allowed
 // Qnd conectar ao broker MQTT ...
 client.on('connect', () => {
 client.subscribe(mqtt_topic, (err) => {
@@ -31,50 +34,32 @@ console.error(`Erro ao se inscrever no tópico ${mqtt_topic}: ${err}`);
  console.log(`Inscrito com sucesso no tópico: ${mqtt_topic}`);
  }
 });
-
 });
- 
-//Recebimento dos dados via mqtt
+
+
+//Recebimento dos dados via mqtt 
 client.on('message', async (topic, payload) => {
- try { 
+  if (topic === 'vaquinha/echo') {
+    try {
       const mensagem = JSON.parse(payload.toString());
       const { identifier, peso } = mensagem;
 
-   if (identifier && peso != null) {
-      pesosPorIdentificador[identifier] = {
-      peso,
-      dataAtualizacao: new Date().toISOString()
-   };
-   console.log(`MQTT: Peso atualizado - ${identifier}: ${peso}kg`);
-   }
- } catch (e) {
- console.error("Erro ao processar mensagem MQTT:", e.message);
- }
- const existente = await projeto_1.findOne({ identifier });
-      const novoRegistro = new projeto_1({
-         identifier,
-         allowed,
-         peso: registroPeso?.peso || "Não recebido",
-         registradoPor: req.session.user.username,
-         data: new Date().toISOString()
- });
- if (existente) {
-// Atualiza o registro existente
- existente.allowed = allowed;
- existente.peso = registroPeso?.peso || existente.peso; // Mantém o peso antigo se não houver atualização via MQTT
- existente.dataPesoAtualizado = registroPeso?.dataAtualizacao || existente.dataPesoAtualizado;
- existente.registradoPor = req.session.user.username;
- existente.data = new Date().toISOString();
- 
- await existente.save(); // Salva as alterações no banco
- console.log('Registro atualizado:', existente);
-
-} else {
-// Se não existir, cria um novo registro
-   await novoRegistro.save(); // Salva no banco
-   console.log('Novo registro:', novoRegistro);
+      if (identifier && peso != null) {
+        await projeto_1.findOneAndUpdate({identifier: identifier},{peso:peso, dataPesoAtualizado: new Date().toISOString()});
+        console.log(`MQTT: Peso atualizado - ${identifier}: ${peso}kg`);
+        client.publish('logs/vaquinha',`MQTT: Peso atualizado - ${identifier}: ${peso}kg`);
+        //console.log("Emitindo socket pesoAtualizado:", { identifier, peso });
+        io.emit('pesoAtualizado', { identifier, peso });
+      }
+    } catch (e) {
+      console.error("Erro ao processar mensagem MQTT:", e.message);
+    }
   }
 });
+
+
+
+// Middleware de teste para simular sessão de usuário caso login dê errado tirar fim do projeto
  
 // Middleware de teste para simular sessão de usuário caso login dê errado
 router.use((req, res, next) => {
@@ -110,8 +95,9 @@ router.post('/register', async (req, res) => {
    return res.status(401).send('Usuário não autenticado');
  }
 
- const registroPeso = pesosPorIdentificador[identifier];
-
+  const peso = pesosPorIdentificador[identifier] || "Não recebido";
+  const existente = registrosProjeto1.find(reg => reg.identifier === identifier);
+  const registroPeso = pesosPorIdentificador[identifier];
  try {
       const existente = await projeto_1.findOne({ identifier });
       const novoRegistro = new projeto_1({
@@ -148,17 +134,45 @@ router.post('/register', async (req, res) => {
 
 });
 
-  res.redirect('/projeto1?success=Animal registrado/atualizado com sucesso'); // Adicionei mensagem de sucesso
  } catch (err) {
   console.error("Erro ao registrar/atualizar animal:", err);
   res.redirect('/projeto1?error=Erro ao registrar/atualizar animal'); // Adicionei mensagem de erro
  }
+
+
+  // Envia mensagem MQTT com 'id,allowed'
+
+  //const mensagemMQTT = JSON.stringify({identifier, allowed});
+  const mensagemMQTT = `${identifier},${allowed}`;
+
+  client.publish(mqtt_topic_send, mensagemMQTT, {}, (err) => {
+    if (err){ 
+      console.error('Erro ao enviar mensagem MQTT:', err);
+      //client.publish('logs/vaquinha', `Erro ao enviar mensagem MQTT:'`);
+    }
+    else {
+      console.log(`Mensagem enviada via MQTT: ${mensagemMQTT}`);
+      client.publish('logs/vaquinha', `Mensagem enviada via MQTT: ${mensagemMQTT}`);
+  }
+});
+
+  res.redirect('/projeto1?success=Animal registrado/atualizado com sucesso'); // Adicionei mensagem de sucesso
 });
 
 // Rota para excluir um animal pelo identifier
 router.post('/delete/:identifier', async (req, res) => {
  const { identifier } = req.params;
 
+  const index = registrosProjeto1.findIndex(r => r.identifier === identifier);
+  if (index !== -1) {
+    registrosProjeto1.splice(index, 1);
+    //console.log(`Animal ${identifier} removido.`);
+    client.publish('logs/vaquinha', `Animal ${identifier} removido.`);
+
+  } else {
+    //console.log(`Animal ${identifier} não encontrado para remoção.`);
+    client.publish('logs/vaquinha', `Animal ${identifier} não encontrado para remoção.`);
+  }
  try {
   const result = await projeto_1.deleteOne({ identifier });
 
@@ -185,4 +199,7 @@ router.post('/delete/:identifier', async (req, res) => {
  }
 });
 
-module.exports = router;
+// Exporta o router
+//module.exports = router;
+return router;
+}
